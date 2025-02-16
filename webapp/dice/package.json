@@ -1,0 +1,25 @@
+{
+  "name": "dice",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "~5.7.2",
+    "vite": "^6.1.0",
+    "vite-plugin-node-polyfills": "^0.23.0"
+  },
+  "dependencies": {
+    "@orbs-network/ton-access": "^2.3.3",
+    "@ton/core": "^0.60.0",
+    "@ton/crypto": "^3.3.0",
+    "@ton/ton": "^15.2.1",
+    "@tonconnect/ui": "^2.0.11",
+    "buffer": "^6.0.3",
+    "ton": "^13.9.0"
+  }
+}
