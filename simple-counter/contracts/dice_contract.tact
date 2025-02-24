@@ -4,9 +4,7 @@ message Withdraw {
     amount: Int as coins;
 }
 
-message Game {
-    side : Int as uint32;
-}
+message Game { }
 
 contract DiceContract with Deployable {
     const MinTonFromStorage: Int = ton("0.01");
@@ -29,11 +27,12 @@ contract DiceContract with Deployable {
     }
 
     receive(msg: Game) {
+        nativeRandomizeLt();
         let gameAmount: Int = myBalance();
         let addAmount: Int = context().value * self.CoefficientGame / 100;
         require(gameAmount > context().value + addAmount, "Nothing amount to the play game");
-        let win: Int = random(0,2);
-        if (win == msg.side) {
+        let win: Int = randomInt();
+        if (win % 2 == 0) {
             send(SendParameters{
                 to : sender(),
                 bounce: true,

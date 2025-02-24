@@ -8,7 +8,7 @@ export async function run(provider: NetworkProvider) {
     await diceContract.send(
         provider.sender(),
         {
-            value: toNano('0.05'),
+            value: toNano('0.02'),
         },
         {
             $$type: 'Deploy',

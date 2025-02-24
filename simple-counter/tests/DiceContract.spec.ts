@@ -48,8 +48,7 @@ describe('Dice', () => {
         console.log("balanceBefore: " + fromNano(balanceBefore))
 
         const game: Game = {
-            $$type: 'Game',
-            side: 0n
+            $$type: 'Game'
         }
 
         for (let i = 0; i < 10; i++) {
@@ -77,12 +76,18 @@ describe('Dice', () => {
     //     const user = await blockchain.treasury('user'); // new wallet user
     //     const balanceBefore = await user.getBalance();
     //     console.log("balanceBefore: " + balanceBefore)
+
+    //     const withdraw: Withdraw = {
+    //         $$type: 'Withdraw',
+    //         amount: 1n
+    //     }
+
     //     await dice.send(
     //         user.getSender(),
     //         {
     //             value : toNano("0.2")
     //         },
-    //         "witdraw all"
+    //         withdraw
     //     )
     //     const balanceAfter = await user.getBalance();
     //     console.log("Balance after: " + balanceAfter);
