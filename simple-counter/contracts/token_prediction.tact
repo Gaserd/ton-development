@@ -39,12 +39,28 @@ message UpdateTreasuryFee {
 message SetDeDustPair {
     new_pair: Address;
 }
+message StartRound {
+    price: Int;
+}
+message BetBull {}
+message BetBear {}
+message EndRound {
+    price: Int;
+}
+message EndRoundBatch {
+    batchSize: Int;
+}
+message ClaimRewards {}
+message WithdrawTreasury {}
 
 contract TokenPrediction with Deployable {
     const STATUS_NOT_STARTED: Int = 0;
     const STATUS_LIVE: Int = 1;
     const STATUS_LOCKED: Int = 2;
     const STATUS_ENDED: Int = 3;
+    const MIN_BET_AMOUNT: Int = ton("1"); // Минимальная ставка 1 TON
+    const MAX_STORED_ROUNDS: Int = 1000;  // Максимальное количество хранимых раундов
+    const CLEANUP_AFTER_ROUNDS: Int = 100; // Каждые 100 раундов проводим очистку
 
     owner: Address; // Адрес владельца контракта
     currentEpoch: Int; // Текущий номер раунда
@@ -114,17 +130,22 @@ contract TokenPrediction with Deployable {
         self.rounds.set(self.currentEpoch, genesisRound);
     }
 
-    fun startRound() {
+    fun startRound(price: Int) {
         require(sender() == self.owner, "Only admin");
         
-        // Проверяем текущий раунд только если это не первый раунд
+        // Проверяем текущий раунд
         if (self.currentEpoch != 0) {
             let currentRound: Round = self.rounds.get(self.currentEpoch)!!;
             require(currentRound.status == self.STATUS_ENDED, "Current round not ended");
         }
 
-        let price: Int = self.getPrice();
         self.currentEpoch = self.currentEpoch + 1;
+        
+        // Очищаем старые данные каждые CLEANUP_AFTER_ROUNDS раундов
+        if (self.currentEpoch % self.CLEANUP_AFTER_ROUNDS == 0) {
+            self.cleanupOldData();
+        }
+
         let currentTimestamp: Int = now();
         
         let newRound: Round = Round{
@@ -143,28 +164,25 @@ contract TokenPrediction with Deployable {
         self.rounds.set(self.currentEpoch, newRound);
     }
 
-    fun lockRound() {
+    fun endRound(price: Int) {
         require(sender() == self.owner, "Only admin");
-        let currentRound: Round = self.rounds.get(self.currentEpoch)!!;
-        require(currentRound.status == self.STATUS_LIVE, "Round not live");
-        require(now() >= currentRound.lockTimestamp, "Lock timestamp not reached");
-        let price: Int = self.getPrice();
-        currentRound.status = self.STATUS_LOCKED;
-        currentRound.lockPrice = price;
-        self.rounds.set(self.currentEpoch, currentRound);
-    }
-
-    fun endRound() {
-        require(sender() == self.owner, "Only admin");
-        let currentRound: Round = self.rounds.get(self.currentEpoch)!!;
-        require(currentRound.status == self.STATUS_LOCKED, "Round not locked");
-        require(now() >= currentRound.closeTimestamp, "Close timestamp not reached");
+        let round: Round = self.rounds.get(self.currentEpoch)!!;
         
-        let price: Int = self.getPrice();
-        currentRound.status = self.STATUS_ENDED;
-        currentRound.closePrice = price;
+        // Проверяем, есть ли ставки с обеих сторон
+        if (round.bullAmount == 0 || round.bearAmount == 0) {
+            // Помечаем раунд как требующий возврата ставок
+            round.status = self.STATUS_LOCKED;
+            round.closePrice = price;
+            self.rounds.set(self.currentEpoch, round);
+            
+            // Возврат ставок будет происходить через endRoundBatch
+            return;
+        }
         
-        self.rounds.set(self.currentEpoch, currentRound);
+        require(now() >= round.closeTimestamp, "Close timestamp not reached");
+        round.status = self.STATUS_ENDED;
+        round.closePrice = price;
+        self.rounds.set(self.currentEpoch, round);
     }
 
     fun endRoundBatch(batchSize: Int) {
@@ -200,56 +218,93 @@ contract TokenPrediction with Deployable {
         }
     }
 
-    receive("bet_bull"){
-        let amount: Int = context().value;
-        self.placeBet(amount, true);
+    receive(msg: BetBull) {
+        self.placeBet(context().value, true);
     }
 
-    receive("bet_bear"){
-        let amount: Int = context().value;
-        self.placeBet(amount, false);
+    receive(msg: BetBear) {
+        self.placeBet(context().value, false);
     }
 
     fun placeBet(amount: Int, isBull: Bool) {
-        require(amount >= self.minBetAmount, "Bet amount too small");
+        require(amount >= self.MIN_BET_AMOUNT, "Bet amount too low");
         let currentRound: Round = self.rounds.get(self.currentEpoch)!!;
         require(currentRound.status == self.STATUS_LIVE, "Round not bettable");
         require(now() < currentRound.lockTimestamp, "Round locked");
+
+        // Проверяем, не ставил ли уже пользователь в этом раунде
+        let existingBet: UserBet? = self.bets.get(sender());
+        require(existingBet == null || existingBet!!.epoch != self.currentEpoch, "Already placed bet in this round");
+
+        // Сразу вычисляем и сохраняем комиссию
+        let treasuryFee: Int = (amount * self.treasuryFee) / 100;
+        self.treasuryBalance = self.treasuryBalance + treasuryFee;
+
+        // Обновляем данные раунда
         currentRound.totalAmount = currentRound.totalAmount + amount;
         if (isBull) {
             currentRound.bullAmount = currentRound.bullAmount + amount;
         } else {
             currentRound.bearAmount = currentRound.bearAmount + amount;
         }
+
         self.rounds.set(self.currentEpoch, currentRound);
-        let userBets: UserBet = self.bets.get(sender())!!;
-        userBets = UserBet {epoch: self.currentEpoch, amount: amount, isBull: isBull, claimed: false};
-        self.bets.set(sender(), userBets);
+        
+        // Сохраняем ставку
+        let userBet: UserBet = UserBet{
+            epoch: self.currentEpoch,
+            amount: amount,
+            isBull: isBull,
+            claimed: false
+        };
+        self.bets.set(sender(), userBet);
     }
 
-    receive("claim_all_rewards") {
+    receive(msg: EndRound) {
+        require(sender() == self.owner, "Only admin");
+        let round: Round = self.rounds.get(self.currentEpoch)!!;
+        round.closePrice = msg.price;    // Сохраняем финальную цену
+        round.status = self.STATUS_ENDED;  // Меняем статус
+        self.rounds.set(self.currentEpoch, round);
+    }
+
+    receive(msg: EndRoundBatch) {
+        self.endRoundBatch(msg.batchSize);
+    }
+
+    receive(msg: ClaimRewards) {
+        self.claimRewards();
+    }
+
+    receive(msg: WithdrawTreasury) {
+        self.withdrawTreasury();
+    }
+
+    fun claimRewards() {
         let sender: Address = context().sender;
-        let defaultReward: UserRewards = UserRewards{
-            pendingRewards: 0,
-            claimedRewards: 0,
-            lastClaimEpoch: 0
-        };
-        let maybeReward: UserRewards? = self.userRewards.get(sender);
-        let userReward: UserRewards = defaultReward;
-        if (maybeReward != null) {
-            userReward = maybeReward!!;
+        
+        // Сначала рассчитываем награду за текущий раунд
+        let round: Round = self.rounds.get(self.currentEpoch)!!;
+        if (round.status == self.STATUS_ENDED) {
+            let bet: UserBet? = self.bets.get(sender);
+            if (bet != null) {
+                let userBet: UserBet = bet!!;
+                if (!userBet.claimed) {
+                    self.claimReward(self.currentEpoch);
+                }
+            }
         }
         
+        // Затем выплачиваем накопленные награды
+        let userReward: UserRewards = self.userRewards.get(sender)!!;
         require(userReward.pendingRewards > 0, "No pending rewards");
         
-        // Отправляем все накопленные награды
         send(SendParameters{
             to: sender,
             value: userReward.pendingRewards,
             mode: SendIgnoreErrors
         });
         
-        // Обновляем статистику наград
         userReward.claimedRewards = userReward.claimedRewards + userReward.pendingRewards;
         userReward.pendingRewards = 0;
         userReward.lastClaimEpoch = self.currentEpoch;
@@ -264,8 +319,8 @@ contract TokenPrediction with Deployable {
         require(bet.epoch == epoch, "No bet for this epoch");
         require(bet.claimed == false, "Rewards already claimed");
         
-        let won: Bool = round.closePrice > round.lockPrice && bet.isBull || 
-                       round.closePrice < round.lockPrice && !bet.isBull;
+        let won: Bool = round.closePrice > round.startPrice && bet.isBull || 
+                       round.closePrice < round.startPrice && !bet.isBull;
         
         if (won) {
             let rewardAmount: Int = self.calculateReward(
@@ -295,10 +350,11 @@ contract TokenPrediction with Deployable {
         }
     }
 
-    fun calculateReward(amount: Int, poolAmount: Int, totalAmount: Int): Int {
-        let feeAmount: Int = (totalAmount * self.treasuryFee) / 100;
-        let rewardPool: Int = totalAmount - feeAmount;
-        return (amount * rewardPool) / poolAmount;
+    fun calculateReward(amount: Int, winningAmount: Int, totalAmount: Int): Int {
+        require(winningAmount > 0, "Division by zero");
+        let treasuryFee: Int = (totalAmount * self.treasuryFee) / 100;
+        let rewardPool: Int = totalAmount - treasuryFee;
+        return (amount * rewardPool) / winningAmount;
     }
 
     fun updateDeDustPair(newPair: Address) {
@@ -327,19 +383,29 @@ contract TokenPrediction with Deployable {
     }
 
     fun processBet(userAddress: Address, bet: UserBet, round: Round) {
-        let won: Bool = (round.closePrice > round.lockPrice && bet.isBull) || 
-                       (round.closePrice < round.lockPrice && !bet.isBull);
-        
-        if (won) {
-            let rewardAmount: Int = self.calculateReward(
-                bet.amount,
-                bet.isBull ? round.bullAmount : round.bearAmount,
-                round.totalAmount
-            );
+        if (round.bullAmount == 0 || round.bearAmount == 0) {
+            // Возвращаем ставку
+            send(SendParameters{
+                to: userAddress,
+                value: bet.amount,
+                mode: SendIgnoreErrors
+            });
+        } else {
+            // Обычная обработка ставки
+            let won: Bool = (round.closePrice > round.startPrice && bet.isBull) || 
+                          (round.closePrice < round.startPrice && !bet.isBull);
             
-            let userReward: UserRewards = self.getUserRewards(userAddress);
-            userReward.pendingRewards = userReward.pendingRewards + rewardAmount;
-            self.userRewards.set(userAddress, userReward);
+            if (won) {
+                let rewardAmount: Int = self.calculateReward(
+                    bet.amount,
+                    bet.isBull ? round.bullAmount : round.bearAmount,
+                    round.totalAmount
+                );
+                
+                let userReward: UserRewards = self.getUserRewards(userAddress);
+                userReward.pendingRewards = userReward.pendingRewards + rewardAmount;
+                self.userRewards.set(userAddress, userReward);
+            }
         }
         
         bet.claimed = true;
@@ -347,7 +413,7 @@ contract TokenPrediction with Deployable {
     }
 
     // Новый метод для вывода комиссии
-    receive("withdraw_treasury") {
+    fun withdrawTreasury() {
         require(sender() == self.owner, "Only admin");
         require(self.treasuryBalance > 0, "No treasury balance");
         
@@ -360,7 +426,7 @@ contract TokenPrediction with Deployable {
         self.treasuryBalance = 0;
     }
 
-    // Геттер для просмотра накопленной комиссии
+    // Добавляем геттер
     get fun getTreasuryBalance(): Int {
         return self.treasuryBalance;
     }
@@ -380,5 +446,57 @@ contract TokenPrediction with Deployable {
     receive(msg: SetDeDustPair) {
         require(sender() == self.owner, "Only admin");
         self.dedust_pair = msg.new_pair;
+    }
+
+    receive(msg: StartRound) {
+        self.startRound(msg.price);
+    }
+
+    get fun getCurrentEpoch(): Int {
+        return self.currentEpoch;
+    }
+
+    get fun getRound(epoch: Int): Round {
+        let round: Round? = self.rounds.get(epoch);
+        require(round != null, "Round not found or expired");
+        return round!!;
+    }
+
+    get fun getIntervalSeconds(): Int {
+        return self.intervalSeconds;
+    }
+
+    fun cleanupOldData() {
+        // Очищаем старые раунды
+        let oldestAllowedEpoch: Int = max(1, self.currentEpoch - self.MAX_STORED_ROUNDS);
+        
+        repeat(self.currentEpoch) {
+            self.rounds.set(oldestAllowedEpoch, null);
+        }
+
+        // Очищаем старые ставки и награды через lastProcessedAddress
+        let lastAddress: Address = self.lastProcessedAddress;
+        let bet: UserBet? = self.bets.get(lastAddress);
+        if (bet != null && bet!!.epoch < oldestAllowedEpoch) {
+            self.bets.set(lastAddress, null);
+        }
+
+        let reward: UserRewards? = self.userRewards.get(lastAddress);
+        if (reward != null && reward!!.lastClaimEpoch < oldestAllowedEpoch && reward!!.pendingRewards == 0) {
+            self.userRewards.set(lastAddress, null);
+        }
+    }
+
+    // Добавляем helper функцию
+    fun max(a: Int, b: Int): Int {
+        if (a > b) {
+            return a;
+        }
+        return b;
+    }
+
+    // Добавляем геттер для проверки доступности данных
+    get fun getOldestAvailableEpoch(): Int {
+        return max(1, self.currentEpoch - self.MAX_STORED_ROUNDS);
     }
 }
